@@ -1,2 +1,4 @@
 data/
 vggt/
+__pycache__/
+predictions_visuals/
