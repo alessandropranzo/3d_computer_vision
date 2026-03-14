@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description="Extract Visualizations from VGGT")
     parser.add_argument("--path1", type=str, default="./data/images/room1/", help="Path to first image folder")
     parser.add_argument("--path2", type=str, default=None, help="Path to second image folder")
+    parser.add_argument("--alternate", action="store_true", help="Alternate frames from path1 and path2 instead of concatenating")
     parser.add_argument("--out_dir", type=str, default="predictions_visuals")
     args = parser.parse_args()
 
@@ -39,7 +40,18 @@ def main():
         image_names2 = [os.path.join(args.path2, f) for f in sorted(os.listdir(args.path2)) if os.path.isfile(os.path.join(args.path2, f))]
         print(f"Loading {len(image_names2)} images from path2...")
         images2 = load_and_preprocess_images(image_names2).to(device)
-        images = torch.cat([images1, images2], dim=0)
+        
+        if args.alternate:
+            s1, c1, h1, w1 = images1.shape
+            s2, c2, h2, w2 = images2.shape
+            min_s = min(s1, s2)
+            
+            # Interleave frames: [img1[0], img2[0], img1[1], img2[1], ...] up to min length
+            images = torch.empty((2 * min_s, c1, h1, w1), device=device, dtype=images1.dtype)
+            images[0::2] = images1[:min_s]
+            images[1::2] = images2[:min_s]
+        else:
+            images = torch.cat([images1, images2], dim=0)
     else:
         images = images1
     
@@ -193,9 +205,29 @@ def main():
         T_inv = -torch.bmm(R_inv, T.unsqueeze(-1)).squeeze(-1)
         
         cam_trajectory = T_inv.numpy()
-        traj_path = os.path.join(out_dir, "camera_trajectory.npy")
-        np.save(traj_path, cam_trajectory)
-        print(f"Camera trajectory saved to: {traj_path}")
+        
+        # Save merged trajectory
+        merged_path = os.path.join(out_dir, "camera_trajectory_merged.npy")
+        np.save(merged_path, cam_trajectory)
+        print(f"Merged camera trajectory saved to: {merged_path}")
+        
+        # Save individual trajectories if two videos were used
+        if args.path2 is not None:
+            s1_len = images1.shape[0]
+            if args.alternate:
+                # In alternate mode, we cut to 2 * min_s, so slices are equal
+                traj_v1 = cam_trajectory[0::2]
+                traj_v2 = cam_trajectory[1::2]
+            else:
+                traj_v1 = cam_trajectory[:s1_len]
+                traj_v2 = cam_trajectory[s1_len:]
+                
+            v1_path = os.path.join(out_dir, "camera_trajectory_v1.npy")
+            v2_path = os.path.join(out_dir, "camera_trajectory_v2.npy")
+            np.save(v1_path, traj_v1)
+            np.save(v2_path, traj_v2)
+            print(f"Video 1 trajectory saved to: {v1_path}")
+            print(f"Video 2 trajectory saved to: {v2_path}")
 
     print(f"Done! Check the {out_dir} for all visualizations.")
 
