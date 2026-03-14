@@ -1,2 +1,8 @@
 data/
+<<<<<<< HEAD
 vggt/
+=======
+vggt/
+__pycache__/
+predictions_visuals/
+>>>>>>> 6434c659df423a26f3486d334eb79d5fba63eb22
