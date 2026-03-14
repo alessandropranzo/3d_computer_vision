@@ -14,7 +14,6 @@ def main():
     parser = argparse.ArgumentParser(description="Extract Visualizations from VGGT")
     parser.add_argument("--path1", type=str, default="./data/images/room1/", help="Path to first image folder")
     parser.add_argument("--path2", type=str, default=None, help="Path to second image folder")
-    parser.add_argument("--shuffle", type=str, choices=["none", "alternate", "random"], default="none", help="How to shuffle frames if two paths are given")
     parser.add_argument("--out_dir", type=str, default="predictions_visuals")
     args = parser.parse_args()
 
@@ -40,28 +39,9 @@ def main():
         image_names2 = [os.path.join(args.path2, f) for f in sorted(os.listdir(args.path2)) if os.path.isfile(os.path.join(args.path2, f))]
         print(f"Loading {len(image_names2)} images from path2...")
         images2 = load_and_preprocess_images(image_names2).to(device)
-        
-        if args.shuffle == "alternate":
-            min_len = min(len(images1), len(images2))
-            alt_images = []
-            for i in range(min_len):
-                alt_images.append(images1[i:i+1])
-                alt_images.append(images2[i:i+1])
-            if len(images1) > min_len:
-                alt_images.append(images1[min_len:])
-            if len(images2) > min_len:
-                alt_images.append(images2[min_len:])
-            images = torch.cat(alt_images, dim=0)
-        else:
-            images = torch.cat([images1, images2], dim=0)
-            if args.shuffle == "random":
-                perm = torch.randperm(images.size(0))
-                images = images[perm]
+        images = torch.cat([images1, images2], dim=0)
     else:
         images = images1
-        if args.shuffle == "random":
-            perm = torch.randperm(images.size(0))
-            images = images[perm]
     
     S, C, H, W = images.shape
     # Create a grid of query points for tracking
