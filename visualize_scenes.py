@@ -31,7 +31,7 @@ import plotly.graph_objects as go
 from scipy.optimize import linear_sum_assignment
 
 
-# ── Geometry helpers (same as nerf_transfer_pipeline.py) ────────────────
+# ── Geometry helpers (same as trajectory_transfer.py) ───────────────────
 
 def extrinsics_to_centers(extrinsics):
     R = extrinsics[:, :3, :3]
@@ -225,7 +225,10 @@ def main():
     parser.add_argument("--room1_dir", default="predictions_visuals/room1")
     parser.add_argument("--room2_dir", default="predictions_visuals/room2")
     parser.add_argument("--images_room1", default="data/images/room1")
-    parser.add_argument("--nerf_results_dir", default="nerf_results")
+    parser.add_argument("--transfer_dir", default="transfer_results",
+                        help="Output of trajectory_transfer.py (novel poses)")
+    parser.add_argument("--nerf_results_dir", default="nerf_results",
+                        help="Output of nerf_render.py (fallback for novel poses)")
     parser.add_argument("--output_dir", default="visualizations")
     parser.add_argument("--subsample", type=int, default=150_000,
                         help="Max points to display per cloud")
@@ -302,15 +305,20 @@ def main():
     print("Figure 4 – Room 1 scene + standalone vs. transferred trajectory")
     print("=" * 60)
 
-    c_transferred = load_transferred_trajectory(args.nerf_results_dir)
+    c_transferred = load_transferred_trajectory(args.transfer_dir)
+    if c_transferred is None:
+        c_transferred = load_transferred_trajectory(args.nerf_results_dir)
+
     row_ind = None
     if c_transferred is not None:
-        print("  Loaded pre-computed novel extrinsics from NeRF results")
-        row_path = os.path.join(args.nerf_results_dir, "match_row_ind.npy")
-        if os.path.exists(row_path):
-            row_ind = np.load(row_path)
+        print("  Loaded pre-computed novel extrinsics")
+        for d in [args.transfer_dir, args.nerf_results_dir]:
+            row_path = os.path.join(d, "match_row_ind.npy")
+            if os.path.exists(row_path):
+                row_ind = np.load(row_path)
+                break
     else:
-        print("  novel_extrinsics.npy not found – recomputing from Stages 1-4")
+        print("  novel_extrinsics.npy not found – recomputing from scratch")
         centers_room1, c_transferred, row_ind, _ = compute_transferred_trajectory(
             args.merged_dir, args.room1_dir, args.images_room1,
         )
