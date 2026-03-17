@@ -194,40 +194,44 @@ def main():
         if len(pose_enc.shape) == 2: # (S, 9)
             pose_enc = pose_enc.unsqueeze(0) # (1, S, 9)
             
-        extrinsics, _ = pose_encoding_to_extri_intri(pose_enc, image_size_hw=(H, W), build_intrinsics=False)
-        # extrinsics is (B, S, 3, 4), meaning R = (B,S,3,3), T = (B,S,3)
+        extrinsics, intrinsics = pose_encoding_to_extri_intri(pose_enc, image_size_hw=(H, W), build_intrinsics=True)
+        # extrinsics: (B, S, 3, 4), intrinsics: (B, S, 3, 3)
+        extri_np = extrinsics[0].float().numpy()  # (S, 3, 4)
+        intri_np = intrinsics[0].float().numpy()   # (S, 3, 3)
+
         R = extrinsics[0, :, :3, :3]
         T = extrinsics[0, :, :3, 3]
-        
-        # Invert to get camera centers in world coordinates: C = - R^T * T
-        # R^T is transpose of R. So R.transpose(1, 2)
         R_inv = R.transpose(1, 2)
         T_inv = -torch.bmm(R_inv, T.unsqueeze(-1)).squeeze(-1)
-        
         cam_trajectory = T_inv.numpy()
-        
-        # Save merged trajectory
-        merged_path = os.path.join(out_dir, "camera_trajectory_merged.npy")
-        np.save(merged_path, cam_trajectory)
-        print(f"Merged camera trajectory saved to: {merged_path}")
-        
-        # Save individual trajectories if two videos were used
+
+        np.save(os.path.join(out_dir, "camera_trajectory_merged.npy"), cam_trajectory)
+        np.save(os.path.join(out_dir, "extrinsics.npy"), extri_np)
+        np.save(os.path.join(out_dir, "intrinsics.npy"), intri_np)
+        print(f"Camera trajectory ({cam_trajectory.shape}), extrinsics ({extri_np.shape}), intrinsics ({intri_np.shape}) saved to {out_dir}")
+
         if args.path2 is not None:
             s1_len = images1.shape[0]
             if args.alternate:
-                # In alternate mode, we cut to 2 * min_s, so slices are equal
                 traj_v1 = cam_trajectory[0::2]
                 traj_v2 = cam_trajectory[1::2]
+                extri_v1 = extri_np[0::2]
+                extri_v2 = extri_np[1::2]
+                intri_v1 = intri_np[0::2]
+                intri_v2 = intri_np[1::2]
             else:
                 traj_v1 = cam_trajectory[:s1_len]
                 traj_v2 = cam_trajectory[s1_len:]
-                
-            v1_path = os.path.join(out_dir, "camera_trajectory_v1.npy")
-            v2_path = os.path.join(out_dir, "camera_trajectory_v2.npy")
-            np.save(v1_path, traj_v1)
-            np.save(v2_path, traj_v2)
-            print(f"Video 1 trajectory saved to: {v1_path}")
-            print(f"Video 2 trajectory saved to: {v2_path}")
+                extri_v1 = extri_np[:s1_len]
+                extri_v2 = extri_np[s1_len:]
+                intri_v1 = intri_np[:s1_len]
+                intri_v2 = intri_np[s1_len:]
+
+            for name, arr in [("camera_trajectory_v1", traj_v1), ("camera_trajectory_v2", traj_v2),
+                              ("extrinsics_v1", extri_v1), ("extrinsics_v2", extri_v2),
+                              ("intrinsics_v1", intri_v1), ("intrinsics_v2", intri_v2)]:
+                np.save(os.path.join(out_dir, f"{name}.npy"), arr)
+            print(f"Per-video extrinsics/intrinsics saved (v1: {extri_v1.shape[0]} frames, v2: {extri_v2.shape[0]} frames)")
 
     print(f"Done! Check the {out_dir} for all visualizations.")
 
