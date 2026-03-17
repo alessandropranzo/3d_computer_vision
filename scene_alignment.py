@@ -19,9 +19,26 @@ def preprocess_cloud(points, voxel_size=0.05):
     return pcd
 
 
+def uniform_subsample(image_names1, image_names2):
+    
+    n1 = len(image_names1)
+    n2 = len(image_names2)
+    n_frames = min(n1, n2)
+    print(f"Using {n_frames} frames from each scene")
+
+    if n1 > n2:
+        idx = np.linspace(0, n1 - 1, n_frames).astype(int)
+        image_names1 = [image_names1[i] for i in idx]
+    elif n2 > n1:
+        idx = np.linspace(0, n2 - 1, n_frames).astype(int)
+        image_names2 = [image_names2[i] for i in idx]
+    
+    return image_names1, image_names2
+
+
 def align_clouds_icp(wp1, wp2, voxel_size=0.05):
     
-    # 1. Convert numpy arrays to Open3D PointClouds
+    # Convert numpy arrays to Open3D PointClouds
     source = preprocess_cloud(wp1, voxel_size)
     target = preprocess_cloud(wp2, voxel_size)
 
@@ -39,6 +56,7 @@ def align_clouds_icp(wp1, wp2, voxel_size=0.05):
         o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
     )
 
+    # RANSAC to find a good initial transformation
     result_ransac = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
         source, target, source_fpfh, target_fpfh,
         mutual_filter=True,
@@ -53,7 +71,7 @@ def align_clouds_icp(wp1, wp2, voxel_size=0.05):
     )
     print(f"RANSAC fitness: {result_ransac.fitness:.3f}, RMSE: {result_ransac.inlier_rmse:.4f}")
 
-    # 3. Run Point-to-Point ICP
+    # Run Point-to-Point ICP
     print("\nRunning ICP...")
     reg_p2p = o3d.pipelines.registration.registration_icp(
         source, target, threshold, result_ransac.transformation,
@@ -77,6 +95,8 @@ def main():
     
     image_names1 = [os.path.join(args.path1, f) for f in sorted(os.listdir(args.path1)) if os.path.isfile(os.path.join(args.path1, f))]
     image_names2 = [os.path.join(args.path2, f) for f in sorted(os.listdir(args.path2)) if os.path.isfile(os.path.join(args.path2, f))]
+
+    image_names1, image_names2 = uniform_subsample(image_names1, image_names2)
     image_names = image_names1 + image_names2
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
