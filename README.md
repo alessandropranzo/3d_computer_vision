@@ -1,176 +1,159 @@
-# 3D Room Reconstruction with COLMAP-Free 3D Gaussian Splatting
+# 3D Computer Vision: Room Reconstruction & Trajectory Transfer Pipeline
 
-Reconstruct your room in 3D from an iPhone video using [CF-3DGS](https://github.com/NVlabs/CF-3DGS)
-(COLMAP-Free 3D Gaussian Splatting, CVPR 2024). No COLMAP pre-processing required -- the method
-jointly estimates camera poses and grows 3D Gaussians from a video sequence.
+## Introduction / Problem Definition
 
-## Overview
+Given two videos of similar environments, the goal is to transfer the camera trajectory from one environment to the other.
 
+## Pipeline Overview
+
+```mermaid
+flowchart TD
+    subgraph Step 1: 3D Feature Extraction
+        Video1[Video 1]
+        Video2[Video 2]
+        VGGT1[VGGT Features 1\n(Poses, Point Cloud)]
+        VGGT2[VGGT Features 2\n(Poses, Point Cloud)]
+    end
+    
+    subgraph Step 2: 3D Environment Alignment
+        Alignment{Alignment Method\n1. VGGT Concatenated\n2. ICP}
+        TransferredTraj[Transferred Trajectory]
+    end
+    
+    subgraph Step 3: Scene Representation of Target
+        SceneRep{Scene Representation\n1. NeRF\n2. Gaussian Splatting}
+    end
+    
+    subgraph Step 4: Rendering
+        Renderer[Render First Environment]
+        NovelViews[Novel Views]
+    end
+
+    %% Data Flow
+    Video1 --> VGGT1
+    Video2 --> VGGT2
+    
+    VGGT1 --> Alignment
+    VGGT2 --> Alignment
+    Alignment --> TransferredTraj
+    
+    Video1 --> SceneRep
+    
+    SceneRep --> Renderer
+    TransferredTraj --> Renderer
+    Renderer --> NovelViews
 ```
-iPhone Video  -->  Frame Extraction (Mac)  -->  Training (GPU Server)  -->  Visualization (Mac)
-                   extract_frames.py             CF-3DGS                    visualize_trajectory.py
-                                                                            visualize_3dgs.py
-```
+
+## Directory Structure
+
+- `notebooks/`: Jupyter notebooks for experimentation and prototyping.
+- `results/` or `output/`: Folders for pipeline outputs (predictions, renderings, transfers).
+- `data/`: Source videos and extracted image frames.
 
 ## Requirements
 
-**Local (macOS)** -- for frame extraction and visualization:
+To install the necessary local dependencies (requires Python 3.8+):
 
 ```bash
-pip install -r requirements_local.txt
+pip install -r requirements.txt
 ```
 
-**Remote (Linux + NVIDIA GPU)** -- for CF-3DGS training:
+For advanced GPU-based components, a remote Linux machine with an NVIDIA GPU is recommended.
+
+## Step-by-Step Pipeline
+
+### Step 1: 3D Feature Extraction
+
+Starting from the two input videos, we independently extract 3D features for each environment using VGGT. First, extract the frames from the input videos:
 
 ```bash
-# Automated setup:
-scp setup_remote.sh user@server:~/
-ssh user@server
-chmod +x setup_remote.sh && ./setup_remote.sh
+# Basic extraction at 2 FPS
+python extract_frames.py --video path/to/video.MOV --output data/images/room1 --fps 2
 ```
 
-Or manually follow the steps in `setup_remote.sh`.
-
-## Step 1: Record Your Room
-
-Use the default iPhone Camera app with these guidelines:
-
-- **Resolution**: 1080p (Settings > Camera > Record Video > 1080p at 30fps)
-- **Orientation**: Hold the phone in **landscape** mode throughout
-- **Movement**: Walk slowly and smoothly. Avoid sudden turns or jerky motions
-- **Overlap**: Move slowly enough that consecutive frames share ~80% of the scene
-- **Lighting**: Ensure even, consistent lighting. Avoid backlighting from windows
-- **Path**: Walk in a continuous path around the room. Starting and ending at the
-  same spot (a loop) works well
-- **Duration**: 30--60 seconds is ideal (produces 60--150 usable frames at 2 FPS)
-- **Avoid**: Reflective surfaces (mirrors, glass), moving objects (people, pets)
-
-Transfer the video to your Mac via AirDrop or cable.
-
-## Step 2: Extract Frames
+Then, extract 3D point clouds and camera poses (extrinsics/intrinsics) from the image sequences using the VGGT model:
 
 ```bash
-# Basic: extract at 2 FPS from a 30fps video
-python extract_frames.py --video ~/path/to/room_video.MOV --fps 2
-
-# With resize (recommended for faster training):
-python extract_frames.py --video ~/path/to/room_video.MOV --fps 2 --resize 960
-
-# Full options:
-python extract_frames.py --video ~/path/to/room_video.MOV \
-    --fps 3 \
-    --resize 960 \
-    --max-frames 200 \
-    --output data/my_room/images
+python extract_visualizations.py \
+    --path1 data/images/room1/ \
+    --path2 data/images/room2/ \
+    --out_dir data/vggt_predictions/
 ```
 
-This saves numbered JPEG frames into `data/my_room/images/`.
+### Step 2: 3D Environment Alignment
 
-## Step 3: Transfer Frames to GPU Server
+Once the 3D features are obtained, we need to align the two environments in the same 3D space.
+
+We consider two possible methods for this alignment:
+- **VGGT with concatenated images** (Procrustes-based alignment approach)
+- **ICP (Iterative Closest Point)** between the two reconstructed rooms
+
+The output of this step is a transferred trajectory, represented as a list of camera positions from the second environment mapped into the coordinate system of the first environment.
 
 ```bash
-scp -r data/my_room user@server:/path/to/CF-3DGS/data/
+# Using ICP
+python trajectory_transfer_icp.py \
+    --room1_dir data/vggt_predictions/room1 \
+    --room2_dir data/vggt_predictions/room2 \
+    --output_dir transfer_results_icp
+
+# Or using the VGGT concatenated Procrustes approach
+python trajectory_transfer.py \
+    --merged_dir data/vggt_predictions/merged \
+    --room1_dir data/vggt_predictions/room1 \
+    --images_room1 data/images/room1 \
+    --output_dir transfer_results
 ```
 
-## Step 4: Train on GPU Server
+### Step 3: Scene Representation of the Target Environment
 
-SSH into the server and run:
+Next, we want to render views in the first environment from these transferred camera positions. 
 
+To do this, we train a scene representation model on the frames of the first environment. We consider two possible approaches:
+- **NeRF (Neural Radiance Fields)**
+- **Gaussian Splatting (GS)**
+
+**For NeRF:**
 ```bash
-conda activate cf3dgs
-cd CF-3DGS
-
-python run_cf3dgs.py -s ./data/my_room/ \
-                     --mode train \
-                     --data_type custom
+python nerf_render.py \
+    --transfer_dir transfer_results \
+    --room1_dir data/vggt_predictions/room1 \
+    --images_room1 data/images/room1 \
+    --output_dir nerf_results
 ```
 
-Training takes ~30--60 minutes depending on the number of frames and GPU.
-
-Output is saved to `./output/progressive/my_room/`:
-- `chkpnt/ep00_init.pth` -- Gaussian model checkpoint
-- `pose/ep00_init.pth` -- estimated camera poses
-- `train/` -- per-frame training renders
-- `eval/` -- evaluation renders
-
-## Step 5: Transfer Results Back
-
+**For Gaussian Splatting:**
+First, prepare the data into COLMAP format:
 ```bash
-scp -r user@server:/path/to/CF-3DGS/output/progressive/my_room/ output/my_room/
+python prepare_gs_data.py \
+    --room1_dir data/vggt_predictions/room1 \
+    --images_dir data/images/room1 \
+    --output_dir data/colmap_room1
 ```
+Then, train using the official INRIA 3DGS repository.
 
-## Step 6: Visualize
+### Step 4: Rendering
 
-### Camera Trajectory
+Finally, we render the first environment using the transferred camera trajectory.
 
+**Rendering with Gaussian Splatting:**
 ```bash
-# Static plot saved to PNG
-python visualize_trajectory.py --pose output/my_room/pose/ep00_init.pth
-
-# Interactive 3D viewer (Open3D)
-python visualize_trajectory.py --pose output/my_room/pose/ep00_init.pth --interactive
-
-# Save to custom path
-python visualize_trajectory.py --pose output/my_room/pose/ep00_init.pth --save my_trajectory.png
+python gs_render.py \
+    --model_path output/gs_room1/point_cloud/iteration_3000/point_cloud.ply \
+    --transfer_dir transfer_results \
+    --images_room1 data/images/room1 \
+    --images_room2 data/images/room2 \
+    --output_dir gs_results
 ```
 
-### 3D Scene
-
+*(You can also generate interactive 3D HTML visualizations to compare trajectories and point clouds before and after the transfer!)*
 ```bash
-# From checkpoint (recommended)
-python visualize_3dgs.py --checkpoint output/my_room/chkpnt/ep00_init.pth
-
-# With camera trajectory overlay
-python visualize_3dgs.py --checkpoint output/my_room/chkpnt/ep00_init.pth \
-                         --pose output/my_room/pose/ep00_init.pth
-
-# Export a simplified PLY for external viewers
-python visualize_3dgs.py --checkpoint output/my_room/chkpnt/ep00_init.pth \
-                         --export my_room_scene.ply
-
-# Adjust opacity filter and point count
-python visualize_3dgs.py --checkpoint output/my_room/chkpnt/ep00_init.pth \
-                         --opacity-threshold 0.1 \
-                         --max-points 300000
+python visualize_scenes.py \
+    --merged_dir data/vggt_predictions/merged \
+    --room1_dir data/vggt_predictions/room1 \
+    --room2_dir data/vggt_predictions/room2 \
+    --images_room1 data/images/room1 \
+    --transfer_dir transfer_results \
+    --output_dir visualizations
 ```
-
-The exported PLY can be opened in [MeshLab](https://www.meshlab.net/),
-[CloudCompare](https://www.cloudcompare.org/), or uploaded to
-[SuperSplat](https://playcanvas.com/supersplat/editor) for web-based viewing.
-
-## Project Structure
-
-```
-3d_computer_vision/
-    README.md                   # This file
-    requirements_local.txt      # macOS dependencies
-    extract_frames.py           # Video to frames
-    visualize_trajectory.py     # Camera trajectory viewer
-    visualize_3dgs.py           # 3D scene viewer
-    setup_remote.sh             # GPU server setup script
-    data/
-        my_room/
-            images/             # Extracted JPEG frames
-    output/                     # Results from training
-        my_room/
-            chkpnt/
-            pose/
-            train/
-            eval/
-```
-
-## References
-
-- [COLMAP-Free 3D Gaussian Splatting](https://oasisyang.github.io/colmap-free-3dgs/) (Fu et al., CVPR 2024)
-- [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) (Kerbl et al., SIGGRAPH 2023)
-
-```bibtex
-@InProceedings{Fu_2024_CVPR,
-    author    = {Fu, Yang and Liu, Sifei and Kulkarni, Amey and Kautz, Jan and Efros, Alexei A. and Wang, Xiaolong},
-    title     = {COLMAP-Free 3D Gaussian Splatting},
-    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-    month     = {June},
-    year      = {2024},
-    pages     = {20796-20805}
-}
-```
+Outputs are saved as HTML files. Open them in any web browser to explore the 3D scene.
