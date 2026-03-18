@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 """
-NeRF Transfer Pipeline
-======================
-1. Load camera parameters from VGGT predictions (room1-only and merged).
-2. Match cameras between rooms in merged space (Hungarian algorithm).
-3. Compute trajectory difference (position + rotation deltas).
-4. Procrustes alignment between merged and standalone coordinate systems.
-5. Train a NeRF on room 1 images + standalone camera poses.
-6. Compute novel camera poses and render transferred views.
+NeRF Train & Render
+===================
+Train a coarse+fine NeRF on room-1 images, then render novel views
+from transferred camera poses (produced by trajectory_transfer.py).
+
+Stages:
+  1. Train NeRF on room-1 images + standalone camera poses.
+  2. Render transferred views from novel camera poses.
+  3. Create side-by-side comparison grids.
 
 Usage:
-    python nerf_transfer_pipeline.py \
-        --merged_dir predictions_visuals/merged \
-        --room1_dir predictions_visuals/room1 \
-        --images_room1 data/images/room1 \
-        --images_room2 data/images/room2
+    python nerf_render.py \\
+        --room1_dir predictions_visuals/room1 \\
+        --images_room1 data/images/room1 \\
+        --images_room2 data/images/room2 \\
+        --transfer_dir transfer_results \\
+        --output_dir nerf_results
+
+    # Render-only (skip training, load existing checkpoint):
+    python nerf_render.py \\
+        --checkpoint nerf_results/nerf_checkpoint.pt \\
+        --transfer_dir transfer_results \\
+        --output_dir nerf_results
 """
 
 import os
@@ -26,28 +34,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 
 # ============================================================
-# Data Loading
+# Image Loading
 # ============================================================
-
-def load_predictions(pred_dir):
-    """Load all .npy camera data from a VGGT predictions directory."""
-    data = {}
-    for name in [
-        "extrinsics", "intrinsics", "camera_trajectory_merged",
-        "extrinsics_v1", "extrinsics_v2", "intrinsics_v1", "intrinsics_v2",
-        "camera_trajectory_v1", "camera_trajectory_v2",
-    ]:
-        path = os.path.join(pred_dir, f"{name}.npy")
-        if os.path.exists(path):
-            data[name] = np.load(path)
-    return data
-
 
 def load_images_for_nerf(image_dir, target_width=518):
     """Load images with VGGT-compatible preprocessing (crop mode).
@@ -78,68 +71,6 @@ def extrinsics_to_centers(extrinsics):
     R = extrinsics[:, :3, :3]
     t = extrinsics[:, :3, 3]
     return -np.einsum("nij,nj->ni", R.transpose(0, 2, 1), t)
-
-
-# ============================================================
-# Camera Matching & Trajectory Difference
-# ============================================================
-
-def match_cameras_hungarian(centers1, centers2):
-    """Optimal one-to-one matching by Euclidean distance (Hungarian).
-
-    Returns (row_ind, col_ind) arrays of matched indices.
-    len(row_ind) == min(len(centers1), len(centers2)).
-    """
-    dist = np.linalg.norm(centers1[:, None] - centers2[None, :], axis=-1)
-    row_ind, col_ind = linear_sum_assignment(dist)
-    return row_ind, col_ind
-
-
-def compute_trajectory_deltas(extrinsics1, extrinsics2, row_ind, col_ind):
-    """Position and rotation deltas between matched pairs.
-
-    Returns:
-        delta_pos  (M, 3)   – C2[col] - C1[row]
-        delta_rot  (M, 3, 3) – R2 @ R1^T  (so that R2 = delta_R @ R1)
-    """
-    c1 = extrinsics_to_centers(extrinsics1[row_ind])
-    c2 = extrinsics_to_centers(extrinsics2[col_ind])
-    delta_pos = c2 - c1
-
-    R1 = extrinsics1[row_ind, :3, :3]
-    R2 = extrinsics2[col_ind, :3, :3]
-    delta_rot = np.einsum("nij,nkj->nik", R2, R1)  # R2 @ R1^T
-    return delta_pos, delta_rot
-
-
-# ============================================================
-# Procrustes Alignment
-# ============================================================
-
-def procrustes_alignment(source, target):
-    """SVD-based Procrustes: target ≈ s * R @ source + t.
-
-    Returns (scale, R_3x3, t_3).
-    """
-    mu_s = source.mean(axis=0)
-    mu_t = target.mean(axis=0)
-    src_c = source - mu_s
-    tgt_c = target - mu_t
-
-    H = src_c.T @ tgt_c
-    U, _, Vt = np.linalg.svd(H)
-    d = np.linalg.det(Vt.T @ U.T)
-    S = np.diag([1.0, 1.0, d])
-    R = Vt.T @ S @ U.T
-
-    scale = np.trace(R @ H) / np.trace(src_c.T @ src_c)
-    t = mu_t - scale * R @ mu_s
-    return scale, R, t
-
-
-def apply_alignment_to_deltas(deltas, scale, rotation):
-    """Rotate and scale delta vectors into the target coordinate system."""
-    return scale * (rotation @ deltas.T).T
 
 
 # ============================================================
@@ -207,7 +138,9 @@ class NeRFMLP(nn.Module):
         return rgb, sigma
 
 
-# ---- Ray helpers --------------------------------------------------------
+# ============================================================
+# Ray Helpers
+# ============================================================
 
 def get_rays_np(H, W, K, extrinsic):
     """All-pixel rays for one camera (numpy).
@@ -232,7 +165,9 @@ def get_rays_np(H, W, K, extrinsic):
     return origins, dirs_world
 
 
-# ---- Sampling -----------------------------------------------------------
+# ============================================================
+# Sampling
+# ============================================================
 
 def stratified_sample(rays_o, rays_d, near, far, N, perturb=True):
     """Stratified sampling.  Returns pts (B, N, 3), t_vals (B, N)."""
@@ -250,13 +185,7 @@ def stratified_sample(rays_o, rays_d, near, far, N, perturb=True):
 
 
 def sample_pdf(bins, weights, N):
-    """Inverse-CDF sampling from a piecewise-constant PDF.
-
-    bins:    (B, M)     – bin edges
-    weights: (B, M-1)   – unnormalised bin weights
-    N:       int         – number of samples
-    Returns  (B, N)      – sampled t-values.
-    """
+    """Inverse-CDF sampling from a piecewise-constant PDF."""
     w = weights + 1e-5
     pdf = w / w.sum(dim=-1, keepdim=True)
     cdf = torch.cumsum(pdf, dim=-1)
@@ -277,15 +206,13 @@ def sample_pdf(bins, weights, N):
     return bins_lo + t * (bins_hi - bins_lo)
 
 
-# ---- Volume rendering ---------------------------------------------------
+# ============================================================
+# Volume Rendering
+# ============================================================
 
 def volume_render(rgb, sigma, t_vals, rays_d):
     """Classic NeRF alpha-compositing.
 
-    rgb:    (B, N, 3)
-    sigma:  (B, N, 1)
-    t_vals: (B, N)
-    rays_d: (B, 3)
     Returns rendered (B, 3), weights (B, N), depth (B,), acc (B,).
     """
     sigma = sigma.squeeze(-1)
@@ -321,7 +248,7 @@ def train_nerf(
     num_iters=20000, batch_size=1024, lr=5e-4,
     N_coarse=64, N_fine=128, device="cuda",
 ):
-    """Train coarse + fine NeRF on room-1 data.
+    """Train coarse + fine NeRF.
 
     images:     (N, H, W, 3) float32 [0,1]
     extrinsics: (N, 3, 4)
@@ -331,7 +258,6 @@ def train_nerf(
     near, far = estimate_scene_bounds(extrinsics)
     print(f"  Scene bounds: near={near:.4f}, far={far:.4f}")
 
-    # Pre-compute all rays
     all_o, all_d, all_c = [], [], []
     for i in range(N_img):
         ro, rd = get_rays_np(H, W, intrinsics[i], extrinsics[i])
@@ -355,7 +281,7 @@ def train_nerf(
         idx = torch.randint(0, n_rays, (batch_size,), device=device)
         ro, rd, tgt = all_o[idx], all_d[idx], all_c[idx]
 
-        # --- coarse ---
+        # coarse pass
         pts_c, t_c = stratified_sample(ro, rd, near, far, N_coarse, perturb=True)
         d_c = rd[:, None, :].expand_as(pts_c)
         rgb_c, sig_c = coarse(pts_c.reshape(-1, 3), d_c.reshape(-1, 3))
@@ -363,7 +289,7 @@ def train_nerf(
         sig_c = sig_c.view(batch_size, N_coarse, 1)
         rend_c, w_c, _, acc_c = volume_render(rgb_c, sig_c, t_c, rd)
 
-        # --- fine (hierarchical) ---
+        # fine pass (hierarchical)
         t_mid = 0.5 * (t_c[:, 1:] + t_c[:, :-1])
         t_f = sample_pdf(t_mid, w_c[:, 1:-1].detach(), N_fine)
         t_all, _ = torch.sort(torch.cat([t_c, t_f], dim=-1), dim=-1)
@@ -376,7 +302,7 @@ def train_nerf(
         sig_f = sig_f.view(batch_size, N_all, 1)
         rend_f, _, _, acc_f = volume_render(rgb_f, sig_f, t_all, rd)
 
-        # --- losses ---
+        # losses
         loss_c = F.mse_loss(rend_c, tgt)
         loss_f = F.mse_loss(rend_f, tgt)
         ent_c = -(acc_c * (acc_c + 1e-6).log() + (1 - acc_c) * (1 - acc_c + 1e-6).log()).mean()
@@ -438,16 +364,23 @@ def render_image(coarse, fine, extrinsic, intrinsic, H, W, near, far,
 
 
 # ============================================================
-# Main Pipeline
+# Main
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="NeRF Transfer Pipeline")
-    parser.add_argument("--merged_dir", default="predictions_visuals/merged")
-    parser.add_argument("--room1_dir", default="predictions_visuals/room1")
+    parser = argparse.ArgumentParser(
+        description="NeRF Train & Render",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--room1_dir", default="results/vggt_predictions/room1",
+                        help="VGGT predictions for room 1 (extrinsics, intrinsics)")
     parser.add_argument("--images_room1", default="data/images/room1")
     parser.add_argument("--images_room2", default="data/images/room2")
-    parser.add_argument("--output_dir", default="nerf_results")
+    parser.add_argument("--transfer_dir", default="results/trajectory_transfers/base",
+                        help="Output of trajectory_transfer.py")
+    parser.add_argument("--output_dir", default="results/nerf_renders/base")
+    parser.add_argument("--checkpoint", default=None,
+                        help="Path to existing checkpoint (skip training)")
     parser.add_argument("--num_iters", type=int, default=20000)
     parser.add_argument("--batch_size", type=int, default=1024)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -455,122 +388,56 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # ==== Stage 1: Load predictions ====
-    print("=" * 60)
-    print("Stage 1 – Loading predictions")
-    print("=" * 60)
+    # ── Load transfer results ──────────────────────────────────────────
+    novel_extri = np.load(os.path.join(args.transfer_dir, "novel_extrinsics.npy"))
+    novel_intri = np.load(os.path.join(args.transfer_dir, "novel_intrinsics.npy"))
+    row_ind = np.load(os.path.join(args.transfer_dir, "match_row_ind.npy"))
+    col_ind = np.load(os.path.join(args.transfer_dir, "match_col_ind.npy"))
+    print(f"Loaded {novel_extri.shape[0]} novel poses from {args.transfer_dir}/")
 
-    merged = load_predictions(args.merged_dir)
-    room1 = load_predictions(args.room1_dir)
-
-    extri_merged = merged["extrinsics"]   # (N_total, 3, 4)
-    intri_merged = merged["intrinsics"]   # (N_total, 3, 3)
-    extri_room1 = room1["extrinsics"]     # (N1, 3, 4)
-    intri_room1 = room1["intrinsics"]     # (N1, 3, 3)
-
-    n1 = len([
-        f for f in sorted(os.listdir(args.images_room1))
-        if f.lower().endswith((".jpg", ".jpeg", ".png"))
-    ])
-    n_total = extri_merged.shape[0]
-    n2 = n_total - n1
-
-    extri_m_r1 = extri_merged[:n1]
-    extri_m_r2 = extri_merged[n1:]
-    centers_m_r1 = extrinsics_to_centers(extri_m_r1)
-    centers_m_r2 = extrinsics_to_centers(extri_m_r2)
-    centers_standalone = extrinsics_to_centers(extri_room1)
-
-    print(f"  Merged frames : {n_total}  (room1={n1}, room2={n2})")
-    print(f"  Standalone r1 : {extri_room1.shape[0]} frames")
-
-    # ==== Stage 2: Camera matching ====
-    print("\n" + "=" * 60)
-    print("Stage 2 – Hungarian camera matching")
-    print("=" * 60)
-
-    row_ind, col_ind = match_cameras_hungarian(centers_m_r1, centers_m_r2)
-    match_dists = np.linalg.norm(
-        centers_m_r1[row_ind] - centers_m_r2[col_ind], axis=-1
-    )
-    print(f"  Matched {len(row_ind)} pairs")
-    print(f"  Distances: mean={match_dists.mean():.4f}  "
-          f"min={match_dists.min():.4f}  max={match_dists.max():.4f}")
-
-    np.save(os.path.join(args.output_dir, "match_row_ind.npy"), row_ind)
-    np.save(os.path.join(args.output_dir, "match_col_ind.npy"), col_ind)
-
-    # ==== Stage 3: Trajectory difference ====
-    print("\n" + "=" * 60)
-    print("Stage 3 – Trajectory deltas")
-    print("=" * 60)
-
-    delta_pos, delta_rot = compute_trajectory_deltas(
-        extri_m_r1, extri_m_r2, row_ind, col_ind
-    )
-    print(f"  Pos-delta mean norm : {np.linalg.norm(delta_pos, axis=-1).mean():.4f}")
-
-    # ==== Stage 4: Procrustes alignment ====
-    print("\n" + "=" * 60)
-    print("Stage 4 – Procrustes alignment (merged → standalone)")
-    print("=" * 60)
-
-    scale, R_align, t_align = procrustes_alignment(centers_m_r1, centers_standalone)
-    aligned = scale * (R_align @ centers_m_r1.T).T + t_align
-    residual = np.linalg.norm(aligned - centers_standalone, axis=-1).mean()
-    print(f"  Scale    : {scale:.6f}")
-    print(f"  Residual : {residual:.6f}")
-
-    delta_aligned = apply_alignment_to_deltas(delta_pos, scale, R_align)
-    print(f"  Aligned-delta mean norm : {np.linalg.norm(delta_aligned, axis=-1).mean():.4f}")
-
-    # ==== Stage 5: Train NeRF on room 1 ====
-    print("\n" + "=" * 60)
-    print("Stage 5 – Training NeRF on room 1")
-    print("=" * 60)
+    # ── Load room-1 data ───────────────────────────────────────────────
+    extri_room1 = np.load(os.path.join(args.room1_dir, "extrinsics.npy"))
+    intri_room1 = np.load(os.path.join(args.room1_dir, "intrinsics.npy"))
 
     images = load_images_for_nerf(args.images_room1)
     H, W = images.shape[1], images.shape[2]
-    print(f"  Images: {images.shape[0]} × {H}×{W}")
+    print(f"Room 1 images: {images.shape[0]} × {H}×{W}")
 
-    coarse, fine, near, far = train_nerf(
-        images, extri_room1, intri_room1,
-        num_iters=args.num_iters,
-        batch_size=args.batch_size,
-        device=args.device,
-    )
+    # ── Train or load NeRF ─────────────────────────────────────────────
+    ckpt_path = args.checkpoint or os.path.join(args.output_dir, "nerf_checkpoint.pt")
 
-    ckpt_path = os.path.join(args.output_dir, "nerf_checkpoint.pt")
-    torch.save({
-        "coarse": coarse.state_dict(),
-        "fine": fine.state_dict(),
-        "near": near, "far": far, "H": H, "W": W,
-    }, ckpt_path)
-    print(f"  Checkpoint → {ckpt_path}")
+    if args.checkpoint and os.path.exists(args.checkpoint):
+        print(f"\nLoading checkpoint from {args.checkpoint}")
+        ckpt = torch.load(args.checkpoint, map_location=args.device)
+        coarse = NeRFMLP().to(args.device)
+        fine = NeRFMLP().to(args.device)
+        coarse.load_state_dict(ckpt["coarse"])
+        fine.load_state_dict(ckpt["fine"])
+        near, far = ckpt["near"], ckpt["far"]
+        H, W = ckpt["H"], ckpt["W"]
+        coarse.eval()
+        fine.eval()
+    else:
+        print("\n" + "=" * 60)
+        print("Training NeRF on room 1")
+        print("=" * 60)
+        coarse, fine, near, far = train_nerf(
+            images, extri_room1, intri_room1,
+            num_iters=args.num_iters,
+            batch_size=args.batch_size,
+            device=args.device,
+        )
+        ckpt_path = os.path.join(args.output_dir, "nerf_checkpoint.pt")
+        torch.save({
+            "coarse": coarse.state_dict(),
+            "fine": fine.state_dict(),
+            "near": near, "far": far, "H": H, "W": W,
+        }, ckpt_path)
+        print(f"  Checkpoint → {ckpt_path}")
 
-    # ==== Stage 6: Novel camera poses ====
+    # ── Render transferred views ───────────────────────────────────────
     print("\n" + "=" * 60)
-    print("Stage 6 – Computing novel camera poses")
-    print("=" * 60)
-
-    novel_extri = extri_room1[row_ind].copy()
-    novel_intri = intri_room1[row_ind].copy()
-
-    R_s = novel_extri[:, :3, :3]
-    t_s = novel_extri[:, :3, 3]
-    c_orig = -np.einsum("nij,nj->ni", R_s.transpose(0, 2, 1), t_s)
-    c_novel = c_orig + delta_aligned
-    t_novel = -np.einsum("nij,nj->ni", R_s, c_novel)
-    novel_extri[:, :3, 3] = t_novel
-
-    np.save(os.path.join(args.output_dir, "novel_extrinsics.npy"), novel_extri)
-    np.save(os.path.join(args.output_dir, "novel_intrinsics.npy"), novel_intri)
-    print(f"  {novel_extri.shape[0]} novel poses saved")
-    print(f"  Mean position shift: {np.linalg.norm(delta_aligned, axis=-1).mean():.4f}")
-
-    # ==== Stage 7: Render transferred views ====
-    print("\n" + "=" * 60)
-    print("Stage 7 – Rendering transferred views")
+    print("Rendering transferred views")
     print("=" * 60)
 
     render_dir = os.path.join(args.output_dir, "transferred_views")
@@ -584,7 +451,7 @@ def main():
         img = np.clip(img, 0.0, 1.0)
         plt.imsave(os.path.join(render_dir, f"transferred_{i:04d}.png"), img)
 
-    # ---- Side-by-side comparison grid ----
+    # ── Comparison grids ───────────────────────────────────────────────
     print("  Creating comparison visualisations …")
     cmp_dir = os.path.join(args.output_dir, "comparisons")
     os.makedirs(cmp_dir, exist_ok=True)

@@ -26,7 +26,7 @@ from PIL import Image
 
 def main():
     parser = argparse.ArgumentParser(description="Convert VGGT to COLMAP format")
-    parser.add_argument("--room1_dir", default="predictions_visuals/room1")
+    parser.add_argument("--room1_dir", default="results/vggt_predictions/room1")
     parser.add_argument("--images_dir", default="data/images/room1")
     parser.add_argument("--output_dir", default="data/colmap_room1")
     args = parser.parse_args()

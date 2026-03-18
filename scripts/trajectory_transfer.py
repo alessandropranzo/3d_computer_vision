@@ -156,10 +156,10 @@ def main():
         description="Trajectory Transfer – compute novel camera poses",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--merged_dir", default="predictions_visuals/merged")
-    parser.add_argument("--room1_dir", default="predictions_visuals/room1")
+    parser.add_argument("--merged_dir", default="results/vggt_predictions/merged")
+    parser.add_argument("--room1_dir", default="results/vggt_predictions/room1")
     parser.add_argument("--images_room1", default="data/images/room1")
-    parser.add_argument("--output_dir", default="transfer_results")
+    parser.add_argument("--output_dir", default="results/trajectory_transfers/base")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)

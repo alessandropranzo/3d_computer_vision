@@ -147,9 +147,9 @@ def main():
         description="Trajectory Transfer via ICP - align two rooms and transfer trajectory",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--room1_dir", default="predictions_visuals/room1", help="Path to target room predictions (Room 1)")
-    parser.add_argument("--room2_dir", default="predictions_visuals/room2", help="Path to source room predictions (Room 2)")
-    parser.add_argument("--output_dir", default="transfer_results_icp", help="Path to save results")
+    parser.add_argument("--room1_dir", default="results/vggt_predictions/room1", help="Path to target room predictions (Room 1)")
+    parser.add_argument("--room2_dir", default="results/vggt_predictions/room2", help="Path to source room predictions (Room 2)")
+    parser.add_argument("--output_dir", default="results/trajectory_transfers/icp", help="Path to save results")
     parser.add_argument("--voxel_size", type=float, default=0.05, help="Voxel size for downsampling and ICP")
     args = parser.parse_args()
 

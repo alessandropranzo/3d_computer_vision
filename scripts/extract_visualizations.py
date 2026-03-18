@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--path1", type=str, default="./data/images/room1/", help="Path to first image folder")
     parser.add_argument("--path2", type=str, default=None, help="Path to second image folder")
     parser.add_argument("--alternate", action="store_true", help="Alternate frames from path1 and path2 instead of concatenating")
-    parser.add_argument("--out_dir", type=str, default="predictions_visuals")
+    parser.add_argument("--out_dir", type=str, default="results/vggt_predictions")
     args = parser.parse_args()
 
     image_names1 = [os.path.join(args.path1, f) for f in sorted(os.listdir(args.path1)) if os.path.isfile(os.path.join(args.path1, f))]

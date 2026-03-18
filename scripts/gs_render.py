@@ -222,10 +222,10 @@ def render_frame(gs_data, extrinsic, intrinsic, H, W, bg_color=torch.tensor([0, 
 def main():
     parser = argparse.ArgumentParser(description="Render 3DGS model on transferred trajectory")
     parser.add_argument("--model_path", required=True, help="Path to .ply or .pth model")
-    parser.add_argument("--transfer_dir", default="transfer_results")
+    parser.add_argument("--transfer_dir", default="results/trajectory_transfers/base")
     parser.add_argument("--images_room1", default="data/images/room1")
     parser.add_argument("--images_room2", default="data/images/room2")
-    parser.add_argument("--output_dir", default="gs_results")
+    parser.add_argument("--output_dir", default="results/gs_renders/base")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)

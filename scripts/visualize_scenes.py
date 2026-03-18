@@ -8,8 +8,10 @@ Generates standalone HTML files you can open in a browser while the NeRF trains.
 
 Visualizations produced:
   1. Room 1 point cloud + standalone camera trajectory
-  2. Merged point cloud + room 1 & room 2 trajectories
-  3. Room 1 point cloud + standalone trajectory + transferred trajectory
+  2. Room 2 point cloud + standalone camera trajectory
+  3. Merged point cloud + room 1 & room 2 trajectories
+  4. Room 1 point cloud + standalone trajectory + transferred trajectory
+  5. ICP Merged scene + room 1 & room 2 trajectories
 
 Usage:
     python visualize_scenes.py
@@ -221,15 +223,17 @@ def main():
         description="Visualize 3D scenes and camera trajectories",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--merged_dir", default="predictions_visuals/merged")
-    parser.add_argument("--room1_dir", default="predictions_visuals/room1")
-    parser.add_argument("--room2_dir", default="predictions_visuals/room2")
+    parser.add_argument("--merged_dir", default="results/vggt_predictions/merged")
+    parser.add_argument("--room1_dir", default="results/vggt_predictions/room1")
+    parser.add_argument("--room2_dir", default="results/vggt_predictions/room2")
     parser.add_argument("--images_room1", default="data/images/room1")
-    parser.add_argument("--transfer_dir", default="transfer_results",
+    parser.add_argument("--transfer_dir", default="results/trajectory_transfers/base",
                         help="Output of trajectory_transfer.py (novel poses)")
-    parser.add_argument("--nerf_results_dir", default="nerf_results",
+    parser.add_argument("--icp_transfer_dir", default="results/trajectory_transfers/icp",
+                        help="Output of trajectory_transfer_icp.py")
+    parser.add_argument("--nerf_results_dir", default="results/nerf_renders/base",
                         help="Output of nerf_render.py (fallback for novel poses)")
-    parser.add_argument("--output_dir", default="visualizations")
+    parser.add_argument("--output_dir", default="results/interactive_visualizations")
     parser.add_argument("--subsample", type=int, default=150_000,
                         help="Max points to display per cloud")
     args = parser.parse_args()
@@ -343,6 +347,32 @@ def main():
         )
     fig4 = build_figure(traces_4, "Room 1 – Standalone vs. Transferred Trajectory")
     save_figure(fig4, os.path.join(args.output_dir, "room1_transferred.html"))
+
+    # ── 5. ICP Merged scene + both room trajectories ──────────────────────
+    icp_room2_ply = os.path.join(args.icp_transfer_dir, "scene_representation_room2_aligned.ply")
+    icp_extri_path = os.path.join(args.icp_transfer_dir, "novel_extrinsics.npy")
+    
+    if os.path.exists(icp_room2_ply) and os.path.exists(icp_extri_path):
+        print("\n" + "=" * 60)
+        print("Figure 5 – ICP Merged scene + room 1 & room 2 trajectories")
+        print("=" * 60)
+        
+        pts2_icp, col2_icp = load_point_cloud(icp_room2_ply, args.subsample)
+        extri_icp = np.load(icp_extri_path)
+        centers_icp = extrinsics_to_centers(extri_icp)
+        
+        traces_5 = [
+            point_cloud_trace(pts1, col1, name="Room 1"),
+            point_cloud_trace(pts2_icp, col2_icp, name="Room 2 (ICP aligned)"),
+            trajectory_trace(centers_room1, "Room 1", "#00ccff"),
+            trajectory_trace(centers_icp, "Room 2 (ICP)", "#ff6600"),
+            *start_end_markers(centers_room1, "R1", "#00ccff"),
+            *start_end_markers(centers_icp, "R2 ICP", "#ff6600"),
+        ]
+        fig5 = build_figure(traces_5, "ICP Merged Scene – Room 1 & Room 2 Trajectories")
+        save_figure(fig5, os.path.join(args.output_dir, "icp_merged_scene.html"))
+    else:
+        print(f"\n  Skipping ICP Merged Scene (predictions not found at {args.icp_transfer_dir})")
 
     print(f"\nDone! Open the HTML files in {args.output_dir}/ with your browser.")
 
