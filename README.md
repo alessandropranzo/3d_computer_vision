@@ -11,17 +11,17 @@ flowchart TD
     subgraph Step 1: 3D Feature Extraction
         Video1[Video 1]
         Video2[Video 2]
-        VGGT1[VGGT Features 1\n(Poses, Point Cloud)]
-        VGGT2[VGGT Features 2\n(Poses, Point Cloud)]
+        VGGT1["VGGT Features 1<br/>(Poses, Point Cloud)"]
+        VGGT2["VGGT Features 2<br/>(Poses, Point Cloud)"]
     end
     
     subgraph Step 2: 3D Environment Alignment
-        Alignment{Alignment Method\n1. VGGT Concatenated\n2. ICP}
+        Alignment{"Alignment Method<br/>1. VGGT Concatenated<br/>2. ICP"}
         TransferredTraj[Transferred Trajectory]
     end
     
     subgraph Step 3: Scene Representation of Target
-        SceneRep{Scene Representation\n1. NeRF\n2. Gaussian Splatting}
+        SceneRep{"Scene Representation<br/>1. NeRF<br/>2. Gaussian Splatting"}
     end
     
     subgraph Step 4: Rendering
